@@ -1,117 +1,124 @@
-import { useEffect, useState } from 'react';
-import axios from 'axios';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { setupSocket } from '../socket'; // Импортируем setupSocket
+import { fetchUsers } from '../api'; // Функция для получения списка пользователей
 
 function UserPage() {
     const navigate = useNavigate();
-    const [users, setUsers] = useState([]); // Состояние для всех пользователей
-    const [currentUserId, setCurrentUserId] = useState(null); // Состояние для текущего пользователя
-    const [isTouching, setIsTouching] = useState(false); // Состояние для отслеживания процесса касания
-    const [touchTimeout, setTouchTimeout] = useState(null); // Таймер для сброса флага касания
-    const [touchMessage, setTouchMessage] = useState(''); // Состояние для отображения сообщения о процессе касания
-    const [timeLeft, setTimeLeft] = useState(0); // Состояние для отсчета времени
+    const [users, setUsers] = useState([]);
+    const [currentUserId, setCurrentUserId] = useState(null);
+    const [isTouching, setIsTouching] = useState(false);
+    const [touchMessage, setTouchMessage] = useState('');
+    const [timeLeft, setTimeLeft] = useState(0);
+    const [socket, setSocket] = useState(null);
+
+    // Функция для отправки уведомлений
+    const sendNotification = useCallback((title, options) => {
+        if (Notification.permission === 'granted') {
+            const notification = new Notification(title, options);
+
+            // Проигрывание звука и вибрации при клике на уведомление
+            notification.onclick = () => {
+                window.focus();
+                playTouchSound(); // Воспроизведение звука
+                if (navigator.vibrate) {
+                    navigator.vibrate([200, 100, 200]); // Вибрация
+                }
+            };
+        }
+    }, []);
 
     useEffect(() => {
         const token = localStorage.getItem('token');
         if (!token) {
-            navigate('/login'); // Перенаправляем на страницу входа, если нет токена
+            navigate('/login');
         } else {
             const userId = localStorage.getItem('userId');
-            setCurrentUserId(userId); // Сохраняем ID текущего пользователя
+            setCurrentUserId(userId);
 
-            const fetchUsers = async () => {
-                try {
-                    const res = await axios.get('http://localhost:3001/users'); // Запрос всех пользователей
-                    setUsers(res.data);
-                } catch (err) {
-                    console.error(err);
-                }
-            };
-            fetchUsers();
+            // Получаем список пользователей
+            fetchUsers()
+                .then((data) => setUsers(data))
+                .catch((err) => console.error(err));
+
+            // Настроим WebSocket-соединение
+            const newSocket = setupSocket(userId);
+            setSocket(newSocket);
+
+            // Обработчик события "touched"
+            newSocket.on('touched', (data) => {
+                sendNotification(`Вас коснулся ${data.touchedBy}`, {
+                    body: 'Нажмите для перехода на сайт',
+                    data: { url: window.location.origin },
+                });
+            });
+
+            // Очистим сокет при размонтировании компонента
+            return () => newSocket.close();
         }
-    }, [navigate]);
+    }, [navigate, sendNotification]);
 
-    const handleTouch = (userId) => {
-        if (isTouching) {
-            setTouchMessage('Подождите, процесс касания еще не завершен!');
-            return; // Если касание еще не завершено, не разрешаем повторное касание
+    // Обработчик для касания
+    const handleTouch = (targetUserId) => {
+        if (isTouching || targetUserId === currentUserId) return;
+
+        setIsTouching(true);
+        setTouchMessage('Касание начато...');
+        setTimeLeft(10);
+
+        // Проигрывание звука
+        playTouchSound();
+
+        // Отправляем событие на сервер
+        if (socket) {
+            socket.emit('touch', { targetUserId, touchedBy: currentUserId });
         }
 
-        if (userId === currentUserId) {
-            alert('Вы не можете коснуться сами себя!');
-            return; // Если это свой профиль, не разрешаем касаться
-        }
-
-        setIsTouching(true); // Устанавливаем флаг касания в true
-        setTouchMessage('Процесс касания...'); // Показываем сообщение о процессе касания
-        setTimeLeft(10); // Начинаем отсчет с 10 секунд
-
-        // Вибрация устройства
-        if (navigator.vibrate) {
-            navigator.vibrate([200, 100, 200]); // Вибрация устройства
-        } else {
-            alert('Ваше устройство не поддерживает вибрацию.');
-        }
-
-        // Звук при касании
-        const touchSound = new Audio('../sounds/touchsound.mp3'); // Замените на путь к вашему звуковому файлу
-        touchSound.play();
-
-        // Таймер для отсчета времени
-        const timeout = setInterval(() => {
-            setTimeLeft((prevTime) => {
-                if (prevTime <= 1) {
-                    clearInterval(timeout); // Останавливаем таймер, когда время истекает
+        const timer = setInterval(() => {
+            setTimeLeft((prev) => {
+                if (prev <= 1) {
+                    clearInterval(timer);
                     setIsTouching(false);
-                    setTouchMessage('Вы можете коснуться другого пользователя!'); // Сообщение после завершения касания
+                    setTouchMessage('');
                     return 0;
                 }
-                return prevTime - 1; // Уменьшаем время на 1 каждую секунду
+                return prev - 1;
             });
-        }, 1000); // Таймер обновляется каждую секунду
-
-        setTouchTimeout(timeout); // Сохраняем таймер для последующего его сброса при необходимости
+        }, 1000);
     };
 
-    const handleLogout = () => {
-        localStorage.removeItem('token');
-        localStorage.removeItem('userId');
-        navigate('/login'); // Переход на страницу логина
+    // Функция для воспроизведения звука
+    const playTouchSound = () => {
+        const touchSound = new Audio('../sounds/touchsound.mp3'); // Убедитесь, что путь правильный
+        touchSound.play(); // Проигрываем звук
     };
-
-    // Фильтруем пользователей, исключая текущего
-    const filteredUsers = users.filter(user => user.id !== currentUserId);
-
-    // Добавим вывод для отладки
-    console.log("currentUserId:", currentUserId);
-    console.log("filteredUsers:", filteredUsers);
 
     return (
         <div className="container">
             <h1>Список пользователей</h1>
-            {filteredUsers.length > 0 ? (
-                <div className="user-list">
-                    {filteredUsers.map((user) => (
-                        <div key={user.id} className="user-item">
-                            <h3>{user.username}</h3>
-                            <button
-                                onClick={() => handleTouch(user.id)}
-                                className="touch-btn"
-                                disabled={isTouching} // Деактивируем кнопку, пока идет касание
-                            >
-                                Коснуться
-                            </button>
-                        </div>
-                    ))}
-                </div>
-            ) : (
-                <p>Загрузка пользователей...</p>
-            )}
-            <br />
-            {touchMessage && <p className="touch-message">{touchMessage}</p>} {/* Сообщение о процессе касания */}
-            {isTouching && timeLeft > 0 && <p>Осталось времени: {timeLeft} секунд</p>} {/* Таймер */}
-            <br />
-            <button onClick={handleLogout} className="logout-btn">
+            <div className="user-list">
+                {users.map((user) => (
+                    <div key={user.id} className="user-item">
+                        <h3>{user.username}</h3>
+                        <button
+                            onClick={() => handleTouch(user.id)} // Касаемся конкретного пользователя
+                            className="touch-btn"
+                            disabled={isTouching}
+                        >
+                            Коснуться
+                        </button>
+                    </div>
+                ))}
+            </div>
+            {touchMessage && <p>{touchMessage}</p>}
+            {isTouching && <p>Осталось времени: {timeLeft} секунд</p>}
+            <button
+                onClick={() => {
+                    localStorage.clear();
+                    navigate('/login');
+                }}
+                className="logout-btn"
+            >
                 Выйти
             </button>
         </div>
