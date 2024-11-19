@@ -85,7 +85,7 @@ function UserPage() {
                 return prev - 1;
             });
         }, 1000);
-    };
+    };  
 
     // Функция для воспроизведения звука
     const playTouchSound = () => {
